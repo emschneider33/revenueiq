@@ -30,8 +30,9 @@ never to freehand SQL or make up figures.
 Phase 1: Data foundation — complete. Full ETL pipeline loads all 7 core
 Dunnhumby CSVs into a 9-table MySQL schema (~2.6M transaction lines).
 
-Phase 2: Analytics engine — in progress. `monthly_revenue` view/function
-built and validated (see Known data caveats below).
+Phase 2: Analytics engine — in progress. `monthly_revenue` and
+`customer_metrics` views/functions built and validated (see Known data
+caveats below).
 
 ## Project structure
 
@@ -87,6 +88,15 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
   ends partway through December 2017 (~4,400 transactions vs. a normal
   month's ~12,500–13,600). Any MoM/YoY comparison logic should exclude
   or flag these two months rather than treating them as real declines.
+- **The observation window ends just 11 days into December 2017**
+  (last transaction day_number=711 → 2017-12-11), not at month's end.
+  This compounds the point above for any per-customer recency metric
+  (see `customer_metrics`): a household that last shopped in, say,
+  November will show a similar recency_days value whether it has truly
+  gone quiet or would simply have returned during the rest of a
+  December the dataset never captured. Don't set churn/inactivity
+  thresholds off `recency_days` without accounting for this truncated
+  window.
 - **Only ~801 of 2,500 households have demographic data** (`dim_household_demographics`).
   Demographic-based segmentation will only ever cover a subset of the
   full customer base.
@@ -99,6 +109,7 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
 | View/function | File | Purpose |
 |---|---|---|
 | `monthly_revenue` | `sql/views.sql`, `src/analytics/revenue.py` | Revenue, transaction count, unique customers, AOV by calendar month |
+| `customer_metrics` | `sql/views.sql`, `src/analytics/customers.py` | Per-household total revenue, order count, AOV, recency, and tenure (recency/tenure measured relative to the dataset's own last transaction day — see caveat above) |
 
 ## Roadmap
 
