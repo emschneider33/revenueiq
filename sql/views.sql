@@ -75,3 +75,72 @@ FROM household_agg h
 JOIN dim_date fd ON fd.day_number = h.first_purchase_day
 JOIN dim_date ld ON ld.day_number = h.last_purchase_day
 CROSS JOIN dataset_bounds db;
+
+-- monthly_cohort_retention: cohort retention curve. Each household is
+-- assigned to a cohort = the calendar month of its first-ever purchase.
+-- For every cohort, this shows what share of that cohort was still
+-- "active" (>=1 transaction) in each subsequent calendar month.
+--
+-- Definition notes:
+--   - This is retail/repeat-purchase retention, not subscription
+--     retention: "active" just means at least one transaction that
+--     month, there's no churn event to detect.
+--   - period_number = months elapsed since the cohort's acquisition
+--     month (0 = the acquisition month itself, when by definition
+--     every household in the cohort is active, so retention_rate = 1.0
+--     at period_number = 0 for every cohort — a good invariant to spot
+--     check).
+--   - retention_rate = active_customers / cohort_size for that
+--     (cohort, period_number) pair.
+--
+-- Caveats from README.md that hit this metric especially hard:
+--   - Jan/Feb/Mar 2016 cohorts are inflated by the customer panel's
+--     ramp-up (unique customers climb from 540 to 1,592 over those
+--     three months) — that's not necessarily real new-customer
+--     acquisition, so treat early-2016 cohort sizes with caution.
+--   - The dataset's collection window ends 2017-12-11 (day_number 711),
+--     11 days into what would be a partial December anyway. A "Dec
+--     2017" cohort is built on almost no observation window, and any
+--     cell whose activity month is Dec 2017 will undercount activity
+--     for the same reason.
+--   - Every cohort is right-censored at the end of the dataset: a
+--     household acquired in Oct 2017 cannot show up at
+--     period_number=6, because there is no Apr 2018 in the data. Don't
+--     compare retention curves across cohorts past the point where the
+--     older cohort runs out of calendar — the curve just stops
+--     because time ran out, not because retention dropped to zero.
+DROP VIEW IF EXISTS monthly_cohort_retention;
+
+CREATE VIEW monthly_cohort_retention AS
+WITH household_cohort AS (
+    SELECT
+        f.household_key,
+        MIN(d.year_num * 12 + (d.month_num - 1)) AS cohort_period
+    FROM fact_transaction_line f
+    JOIN dim_date d ON f.day_number = d.day_number
+    GROUP BY f.household_key
+),
+household_month_activity AS (
+    SELECT DISTINCT
+        f.household_key,
+        d.year_num * 12 + (d.month_num - 1) AS activity_period
+    FROM fact_transaction_line f
+    JOIN dim_date d ON f.day_number = d.day_number
+),
+cohort_sizes AS (
+    SELECT cohort_period, COUNT(*) AS cohort_size
+    FROM household_cohort
+    GROUP BY cohort_period
+)
+SELECT
+    FLOOR(hc.cohort_period / 12)               AS cohort_year,
+    MOD(hc.cohort_period, 12) + 1               AS cohort_month,
+    hma.activity_period - hc.cohort_period      AS period_number,
+    cs.cohort_size,
+    COUNT(DISTINCT hma.household_key)           AS active_customers,
+    ROUND(COUNT(DISTINCT hma.household_key) / cs.cohort_size, 4) AS retention_rate
+FROM household_cohort hc
+JOIN household_month_activity hma ON hma.household_key = hc.household_key
+JOIN cohort_sizes cs ON cs.cohort_period = hc.cohort_period
+GROUP BY hc.cohort_period, cs.cohort_size, hma.activity_period - hc.cohort_period
+ORDER BY cohort_year, cohort_month, period_number;
