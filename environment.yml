@@ -1,0 +1,16 @@
+name: revenueiq
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pandas
+  - numpy
+  - sqlalchemy
+  - python-dotenv
+  - jupyter
+  - pip
+  - pip:
+      - pymysql
+      - anthropic
+      - streamlit

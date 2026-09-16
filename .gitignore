@@ -1,0 +1,30 @@
+# Environment / secrets
+.env
+*.env
+
+# Data — never commit raw or processed data files
+data/raw/*
+!data/raw/.gitkeep
+data/processed/
+*.csv
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Conda / venv
+.conda/
+env/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
