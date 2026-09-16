@@ -144,3 +144,149 @@ JOIN household_month_activity hma ON hma.household_key = hc.household_key
 JOIN cohort_sizes cs ON cs.cohort_period = hc.cohort_period
 GROUP BY hc.cohort_period, cs.cohort_size, hma.activity_period - hc.cohort_period
 ORDER BY cohort_year, cohort_month, period_number;
+
+-- customer_rfm_segments: RFM (Recency, Frequency, Monetary) segmentation
+-- of households, built directly on customer_metrics.
+--
+-- Scoring: each of recency_days, order_count, and total_revenue is
+-- bucketed into quintiles (NTILE(5)) across all households, so every
+-- score is relative to this dataset's own customer base, not an
+-- absolute business benchmark. Score 5 = best in every case:
+--   r_score: 5 = most recent purchase (lowest recency_days)
+--   f_score: 5 = most orders
+--   m_score: 5 = highest total revenue
+-- fm_score = average of f_score and m_score, collapsing frequency and
+-- monetary onto a single "value" axis — the standard simplification
+-- most RFM frameworks use, since the two are usually highly
+-- correlated (see the sanity-check households below).
+--
+-- Segment labels are a simplified version of the common RFM segment
+-- grid (fewer buckets than the full 11-segment version some marketing
+-- tools use), chosen to stay easy to audit and retune rather than
+-- matching any one external framework exactly. Thresholds are cut
+-- points on the 1-5 score scale and can be adjusted here without
+-- touching any underlying data:
+--   Champions        - buy often/big AND recently   (r>=4, fm>=4)
+--   Loyal Customers  - solid on both axes, not top-tier (r>=3, fm>=3)
+--   Promising        - recent purchase, not yet frequent/high-value
+--                      (r>=4, fm<3)
+--   At Risk          - used to be valuable, hasn't purchased recently
+--                      (r<3, fm>=4)
+--   Hibernating      - low on both axes                (r<3, fm<3)
+--   Needs Attention  - everyone else (mid-pack on one or both axes)
+--
+-- Caveat inherited from customer_metrics: recency_days is measured
+-- against the dataset's truncated Dec 2017 end date (see README), so
+-- r_score is compressed toward "recent" for anyone who shopped in the
+-- last weeks of the dataset regardless of their real-world habits.
+--
+-- Performance: this view queries customer_metrics, which itself
+-- re-aggregates the full fact table on every call (see Performance
+-- notes in README.md) — expect the same cold-cache/warm-cache timing
+-- behavior here as there.
+DROP VIEW IF EXISTS customer_rfm_segments;
+
+CREATE VIEW customer_rfm_segments AS
+WITH scored AS (
+    SELECT
+        cm.household_key,
+        cm.total_revenue,
+        cm.order_count,
+        cm.recency_days,
+        cm.tenure_days,
+        6 - NTILE(5) OVER (ORDER BY cm.recency_days ASC) AS r_score,
+        NTILE(5) OVER (ORDER BY cm.order_count ASC)       AS f_score,
+        NTILE(5) OVER (ORDER BY cm.total_revenue ASC)      AS m_score
+    FROM customer_metrics cm
+)
+SELECT
+    household_key,
+    total_revenue,
+    order_count,
+    recency_days,
+    tenure_days,
+    r_score,
+    f_score,
+    m_score,
+    ROUND((f_score + m_score) / 2, 1) AS fm_score,
+    CASE
+        WHEN r_score >= 4 AND (f_score + m_score) / 2 >= 4 THEN 'Champions'
+        WHEN r_score >= 3 AND (f_score + m_score) / 2 >= 3 THEN 'Loyal Customers'
+        WHEN r_score >= 4 AND (f_score + m_score) / 2 < 3  THEN 'Promising'
+        WHEN r_score < 3  AND (f_score + m_score) / 2 >= 4 THEN 'At Risk'
+        WHEN r_score < 3  AND (f_score + m_score) / 2 < 3  THEN 'Hibernating'
+        ELSE 'Needs Attention'
+    END AS rfm_segment
+FROM scored;
+
+-- product_performance: per-product revenue, units sold, transaction
+-- count, and unique-customer reach, joined to dim_product's
+-- descriptive fields (department, brand, commodity_desc,
+-- sub_commodity_desc) for filtering and grouping.
+--
+-- Only products that appear in at least one transaction get a row
+-- (inner join) -- dim_product's full ~92k-product catalog is not
+-- reproduced here, only what actually sold.
+--
+-- Caveat to verify once this runs: fact_transaction_line's quantity
+-- and sales_value are used as-is, with no filtering for returns. If
+-- the raw Dunnhumby data includes negative quantity/sales_value rows
+-- (returns), total_revenue and units_sold here are NET figures
+-- (gross sales minus returns), not gross sales -- worth confirming
+-- with a MIN(quantity)/MIN(sales_value) check on the fact table
+-- before trusting "top products" rankings at face value.
+DROP VIEW IF EXISTS product_performance;
+
+CREATE VIEW product_performance AS
+SELECT
+    p.product_id,
+    p.department,
+    p.brand,
+    p.commodity_desc,
+    p.sub_commodity_desc,
+    SUM(f.sales_value)                     AS total_revenue,
+    SUM(f.quantity)                         AS units_sold,
+    COUNT(DISTINCT f.basket_id)             AS transaction_count,
+    COUNT(DISTINCT f.household_key)         AS unique_customers,
+    ROUND(SUM(f.sales_value) / NULLIF(SUM(f.quantity), 0), 2) AS avg_unit_price
+FROM fact_transaction_line f
+JOIN dim_product p ON f.product_id = p.product_id
+GROUP BY p.product_id, p.department, p.brand, p.commodity_desc, p.sub_commodity_desc;
+
+-- department_performance: revenue/units/customer-reach rollup by
+-- department, plus each department's share of total revenue.
+--
+-- Deliberately independent of product_performance (aggregates
+-- fact_transaction_line directly rather than summing it) so this
+-- coarser-grained view isn't slowed down by product_performance's
+-- ~92k-group aggregation -- department has far fewer distinct values.
+DROP VIEW IF EXISTS department_performance;
+
+CREATE VIEW department_performance AS
+WITH dept_agg AS (
+    SELECT
+        p.department,
+        SUM(f.sales_value)                  AS total_revenue,
+        SUM(f.quantity)                       AS units_sold,
+        COUNT(DISTINCT f.basket_id)           AS transaction_count,
+        COUNT(DISTINCT f.household_key)       AS unique_customers,
+        COUNT(DISTINCT p.product_id)          AS unique_products
+    FROM fact_transaction_line f
+    JOIN dim_product p ON f.product_id = p.product_id
+    GROUP BY p.department
+),
+total AS (
+    SELECT SUM(total_revenue) AS grand_total_revenue FROM dept_agg
+)
+SELECT
+    d.department,
+    d.total_revenue,
+    ROUND(100 * d.total_revenue / t.grand_total_revenue, 2) AS revenue_share_pct,
+    d.units_sold,
+    d.transaction_count,
+    d.unique_customers,
+    d.unique_products,
+    ROUND(d.total_revenue / NULLIF(d.units_sold, 0), 2)     AS avg_unit_price
+FROM dept_agg d
+CROSS JOIN total t
+ORDER BY d.total_revenue DESC;
