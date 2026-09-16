@@ -30,9 +30,10 @@ never to freehand SQL or make up figures.
 Phase 1: Data foundation — complete. Full ETL pipeline loads all 7 core
 Dunnhumby CSVs into a 9-table MySQL schema (~2.6M transaction lines).
 
-Phase 2: Analytics engine — in progress. `monthly_revenue`,
-`customer_metrics`, and `monthly_cohort_retention` views/functions built
-and validated (see Known data caveats and Performance notes below).
+Phase 2: Analytics engine — complete. `monthly_revenue`,
+`customer_metrics`, `monthly_cohort_retention`, `customer_rfm_segments`,
+`product_performance`, and `department_performance` are all built and
+validated (see Known data caveats and Performance notes below).
 
 ## Project structure
 
@@ -66,6 +67,23 @@ Create the database in MySQL Workbench:
 CREATE DATABASE revenueiq;
 ```
 
+**Check `innodb_buffer_pool_size` before doing anything else.** Some
+local MySQL installs (this one included) end up with this set far
+below MySQL's normal 128MB default — as low as 8MB, which is nowhere
+near enough to work with a 2.6M-row fact table. With it set that low,
+even simple aggregate queries can take minutes or drop the connection
+entirely ("Error Code: 2013. Lost connection to MySQL server during
+query" is the telltale symptom). To check and fix:
+
+```sql
+SHOW VARIABLES LIKE 'innodb_buffer_pool_size';
+```
+
+If it's small, edit `innodb_buffer_pool_size` in `my.ini` (Windows:
+`C:\ProgramData\MySQL\MySQL Server 8.0\my.ini`, requires editing as
+Administrator) to something like `512M`, then restart the MySQL
+service for it to take effect. See Performance notes below for more.
+
 ## Dataset
 
 [Dunnhumby - The Complete Journey](https://www.kaggle.com/datasets/frtgnn/dunnhumby-the-complete-journey)
@@ -96,7 +114,10 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
   gone quiet or would simply have returned during the rest of a
   December the dataset never captured. Don't set churn/inactivity
   thresholds off `recency_days` without accounting for this truncated
-  window.
+  window. This same compression shows up in `customer_rfm_segments`:
+  a large share of households cluster at low recency_days simply
+  because the dataset stopped recording, which pulls the R-score
+  quintile boundaries tighter than they'd be with a real "today."
 - **The same truncation right-censors cohort retention.** In
   `monthly_cohort_retention`, a household acquired late in the
   dataset's life (e.g. Oct 2017) cannot show up at a high
@@ -110,28 +131,41 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
 - **`causal_data.csv` (promotional display/mailer data, ~679MB) is not
   yet loaded** — deferred to when promotion-effectiveness analysis is
   built.
+- **No returns in the raw data (checked).** `fact_transaction_line`
+  has no negative `quantity` or `sales_value` rows (verified via
+  `MIN()` on both columns), so `total_revenue` and `units_sold` in
+  `product_performance` / `department_performance` are gross figures,
+  not net of returns. Worth re-checking if the ETL or source data ever
+  changes.
 
 ## Performance notes
 
-- **`customer_metrics` and `monthly_cohort_retention` re-aggregate the
-  entire fact table on every query.** Both use a `GROUP BY` inside a
-  CTE, and MySQL can't push a `WHERE` filter through that kind of
-  view — even `SELECT ... WHERE household_key = 718` first computes
-  the aggregate for all ~2,500 households across all ~2.6M
-  transaction lines, then filters afterward. Fine at this data size,
-  but worth knowing before assuming a filtered query will be cheap.
-- **Expect a slow first query and fast subsequent ones.** A cold
-  InnoDB buffer pool means the first query against one of these views
-  after a while can take 30-50+ seconds (reading ~2.6M rows off disk);
-  once those pages are cached, the same shape of query drops to a few
-  seconds. This is normal, not a sign anything is broken.
+- **Check `innodb_buffer_pool_size` first if anything here feels
+  slow.** This was the root cause of a full afternoon of "lost
+  connection" errors that looked like server crashes but weren't — see
+  Setup above. Confirm it's a reasonable size (hundreds of MB, not
+  single-digit MB) before assuming a view itself is the problem.
+- **`customer_metrics`, `monthly_cohort_retention`, and
+  `customer_rfm_segments` re-aggregate the full fact table on every
+  query.** Each uses a `GROUP BY` inside a CTE, and MySQL can't push a
+  `WHERE` filter through that kind of view — even a single-household
+  lookup first computes the aggregate for all ~2,500 households across
+  all ~2.6M transaction lines, then filters afterward.
+- **`GROUP BY` on text columns is much more expensive than on an
+  integer key.** `product_performance` originally grouped by five
+  columns including three VARCHAR fields, which made a simple
+  `COUNT(*)` take 5+ minutes even with a healthy buffer pool. Grouping
+  by `product_id` alone (dim_product's primary key — every other
+  selected column is functionally dependent on it) fixed this; keep
+  this in mind when adding new views that join in descriptive text
+  columns.
 - **If using MySQL Workbench, raise the default query timeout.**
   Workbench's default "DBMS connection read timeout" is 30 seconds
   (Edit → Preferences → SQL Editor), which is shorter than a cold-cache
-  query against these views can take. Hitting that limit surfaces as
-  `Error Code: 2013. Lost connection to MySQL server during query` —
-  which looks like a server crash but isn't one. Raise it to something
-  like 300 seconds.
+  query against these views can take even with a healthy buffer pool.
+  Hitting that limit surfaces as `Error Code: 2013. Lost connection to
+  MySQL server during query` — which looks like a server crash but
+  isn't one. Raise it to something like 300 seconds.
 
 ## Analytics reference
 
@@ -140,11 +174,14 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
 | `monthly_revenue` | `sql/views.sql`, `src/analytics/revenue.py` | Revenue, transaction count, unique customers, AOV by calendar month |
 | `customer_metrics` | `sql/views.sql`, `src/analytics/customers.py` | Per-household total revenue, order count, AOV, recency, and tenure (recency/tenure measured relative to the dataset's own last transaction day — see caveat above) |
 | `monthly_cohort_retention` | `sql/views.sql`, `src/analytics/retention.py` | Cohort retention curve: share of each acquisition-month cohort still active in each subsequent calendar month (see caveats above on the panel ramp-up, truncated Dec 2017, and right-censoring) |
+| `customer_rfm_segments` | `sql/views.sql`, `src/analytics/segmentation.py` | RFM (Recency/Frequency/Monetary) score and segment label per household — Champions, Loyal Customers, Promising, At Risk, Hibernating, Needs Attention |
+| `product_performance` | `sql/views.sql`, `src/analytics/products.py` | Per-product revenue, units sold, transaction count, unique customers, avg unit price, with department/brand/commodity descriptors |
+| `department_performance` | `sql/views.sql`, `src/analytics/products.py` | Revenue/units/customer-reach rollup by department, with each department's share of total revenue |
 
 ## Roadmap
 
-1. **Data foundation** — ETL, MySQL schema (current)
-2. **Analytics engine** — revenue, retention, segmentation, product performance
+1. **Data foundation** — ETL, MySQL schema ✅
+2. **Analytics engine** — revenue, retention, segmentation, product performance ✅
 3. **Intelligence layer** — decomposition, anomaly detection, churn, promotion effectiveness
 4. **Claude-powered analyst** — tool-calling over validated analytics functions
 5. **Streamlit UI**

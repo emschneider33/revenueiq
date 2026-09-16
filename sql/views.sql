@@ -251,7 +251,14 @@ SELECT
     ROUND(SUM(f.sales_value) / NULLIF(SUM(f.quantity), 0), 2) AS avg_unit_price
 FROM fact_transaction_line f
 JOIN dim_product p ON f.product_id = p.product_id
-GROUP BY p.product_id, p.department, p.brand, p.commodity_desc, p.sub_commodity_desc;
+-- Grouping by product_id alone (not all five selected columns) matters
+-- a lot here: product_id is dim_product's primary key, so department,
+-- brand, commodity_desc, and sub_commodity_desc are all functionally
+-- dependent on it -- MySQL allows selecting them ungrouped as a result.
+-- Grouping by three VARCHAR columns in addition to product_id forced a
+-- much more expensive string-based sort/group over 2.6M rows; grouping
+-- by the single integer PK is dramatically cheaper for the same result.
+GROUP BY p.product_id;
 
 -- department_performance: revenue/units/customer-reach rollup by
 -- department, plus each department's share of total revenue.
