@@ -27,7 +27,11 @@ never to freehand SQL or make up figures.
 
 ## Status
 
-Phase 1: Data foundation — in progress.
+Phase 1: Data foundation — complete. Full ETL pipeline loads all 7 core
+Dunnhumby CSVs into a 9-table MySQL schema (~2.6M transaction lines).
+
+Phase 2: Analytics engine — in progress. `monthly_revenue` view/function
+built and validated (see Known data caveats below).
 
 ## Project structure
 
@@ -68,6 +72,33 @@ CREATE DATABASE revenueiq;
 plus product, campaign, coupon, and demographic data.
 
 Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
+
+## Known data caveats
+
+- **Dates are synthetic.** The raw data has no real calendar dates, only
+  a relative `DAY` integer (1 to ~719). `dim_date` anchors day_number=1
+  to 2016-01-01 (an arbitrary but documented choice) so real
+  month/week/year rollups are possible. The anchor date itself carries
+  no business meaning.
+- **January 2016 and December 2017 are partial periods**, not genuine
+  low-revenue months. The customer panel appears to have ramped up
+  gradually in Jan–Mar 2016 (unique customers climb from 540 to 1,592
+  over those three months), and the dataset's data collection window
+  ends partway through December 2017 (~4,400 transactions vs. a normal
+  month's ~12,500–13,600). Any MoM/YoY comparison logic should exclude
+  or flag these two months rather than treating them as real declines.
+- **Only ~801 of 2,500 households have demographic data** (`dim_household_demographics`).
+  Demographic-based segmentation will only ever cover a subset of the
+  full customer base.
+- **`causal_data.csv` (promotional display/mailer data, ~679MB) is not
+  yet loaded** — deferred to when promotion-effectiveness analysis is
+  built.
+
+## Analytics reference
+
+| View/function | File | Purpose |
+|---|---|---|
+| `monthly_revenue` | `sql/views.sql`, `src/analytics/revenue.py` | Revenue, transaction count, unique customers, AOV by calendar month |
 
 ## Roadmap
 
