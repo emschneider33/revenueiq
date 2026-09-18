@@ -14,3 +14,4 @@ dependencies:
       - pymysql
       - anthropic
       - streamlit
+      - plotly

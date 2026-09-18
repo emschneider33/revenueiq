@@ -52,6 +52,14 @@ the returned data — it never computes a number itself. Tested against
 several questions (promotion lift, customer churn) with the returned
 figures cross-checked directly against Workbench — all matched.
 
+Phase 5: Streamlit UI — complete. `app/streamlit_app.py` wraps the
+project in a two-tab web app: a Dashboard tab (7 chart/table sections
+covering every Phase 2/3 view) and an AI Analyst tab (the exact same
+Phase 4 chat loop, in a browser instead of a terminal). See Running the
+app below.
+
+All five phases of the roadmap are now complete.
+
 ## Project structure
 
 ```
@@ -289,8 +297,32 @@ counterparts (`get_segment_summary`, `get_churn_summary`,
 The raw functions still work directly from Python/notebooks, just not
 through chat.
 
-There's no Streamlit UI yet (Phase 5) — this CLI loop exists to test
-the tool-calling layer on its own first.
+This CLI loop still works standalone and is the fastest way to
+sanity-check the tool-calling layer on its own — but `app/streamlit_app.py`
+(below) wraps this exact same logic in a web UI, and is how the
+project is meant to be used day to day.
+
+## Running the app
+
+```bash
+conda activate revenueiq
+streamlit run app/streamlit_app.py
+```
+
+Opens a two-tab browser app:
+
+- **Dashboard** — 7 chart/table sections (monthly revenue with anomaly
+  markers, revenue by customer status, churn risk, RFM segments,
+  department revenue, top products, promotion effectiveness), all
+  built from the same functions in the Analytics reference table
+  above. Nothing is computed in `app/streamlit_app.py` itself.
+- **AI Analyst** — a chat interface wired to the identical
+  `run_conversation()` loop from `src/ai/analyst.py` (same system
+  prompt, same 10 tools, same dispatcher) — not a separate or
+  simplified version of Phase 4.
+
+Requires `ANTHROPIC_API_KEY` in `.env` (see Setup above) for the AI
+Analyst tab; the Dashboard tab works without it.
 
 ## Roadmap
 
@@ -298,4 +330,4 @@ the tool-calling layer on its own first.
 2. **Analytics engine** — revenue, retention, segmentation, product performance ✅
 3. **Intelligence layer** — decomposition ✅, churn ✅, anomaly detection ✅, promotion effectiveness ✅
 4. **Claude-powered analyst** — tool-calling over validated analytics functions ✅
-5. **Streamlit UI**
+5. **Streamlit UI** — dashboard + AI analyst chat ✅
