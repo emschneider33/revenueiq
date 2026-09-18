@@ -15,13 +15,25 @@ def get_promotion_lift_summary(engine) -> pd.DataFrame:
     return pd.read_sql("SELECT * FROM promotion_lift_summary", engine)
 
 
-def get_product_promotion_lift(engine) -> pd.DataFrame:
-    """Per-product sales lift when promoted vs. not.
+def get_product_promotion_lift(engine, limit: int = 20) -> pd.DataFrame:
+    """Per-product sales lift when promoted vs. not, highest lift first.
 
     Only includes products with at least 3 promoted and 3
     not-promoted product/store/weeks (filtered in the view itself),
     so the lift % isn't computed off a single noisy data point.
-    Sorted by revenue_lift_pct descending -- biggest promotion
-    responders first.
+    `limit` caps how many rows come back -- the view is already
+    ordered by revenue_lift_pct descending, so this returns the
+    biggest promotion responders. Pass a larger limit (or query the
+    view directly) to see further down the list.
     """
-    return pd.read_sql("SELECT * FROM product_promotion_lift", engine)
+    limit = int(limit)  # guard against non-integer input before string-formatting into SQL
+    return pd.read_sql(f"SELECT * FROM product_promotion_lift LIMIT {limit}", engine)
+
+
+if __name__ == "__main__":
+    # Quick manual check: run this file directly to print the overall
+    # promotion lift summary to the console.
+    from src.ingestion.db import get_engine
+
+    engine = get_engine()
+    print(get_promotion_lift_summary(engine).to_string(index=False))

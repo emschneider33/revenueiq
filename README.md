@@ -44,6 +44,14 @@ month vs. a trailing rolling baseline), and `promotion_lift_summary` /
 and/or in the mailer vs. not, overall and per-product) are all built
 and validated.
 
+Phase 4: Claude-powered analyst — complete. A terminal chat loop
+(`src/ai/analyst.py`) sends questions to Claude with 10 of the
+analytics functions exposed as tools (see AI analyst below); Claude
+calls whichever tool(s) fit the question and writes the answer from
+the returned data — it never computes a number itself. Tested against
+several questions (promotion lift, customer churn) with the returned
+figures cross-checked directly against Workbench — all matched.
+
 ## Project structure
 
 ```
@@ -67,8 +75,13 @@ revenueiq/
 ```bash
 conda env create -f environment.yml
 conda activate revenueiq
-cp .env.example .env   # fill in your MySQL credentials
+cp .env.example .env   # fill in your MySQL credentials and ANTHROPIC_API_KEY
 ```
+
+The AI analyst layer (Phase 4) needs an Anthropic API key — separate
+from a claude.ai subscription, its own pay-as-you-go billing at
+[console.anthropic.com](https://console.anthropic.com). Add it to
+`.env` as `ANTHROPIC_API_KEY=sk-ant-...`.
 
 Create the database in MySQL Workbench:
 
@@ -252,10 +265,37 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
 | `promotion_lift_summary` | `sql/views.sql`, `src/analytics/promotions.py` | Overall (all products combined) average revenue/units per product/store/week when promoted vs. not — the starting point before drilling into individual products |
 | `product_promotion_lift` | `sql/views.sql`, `src/analytics/promotions.py` | Per-product revenue/units lift % when promoted vs. not, for products with enough sample size on both sides (see caveats above on the promoted/not-promoted definition, the display/mailer code assumption, and the gas/kiosk exclusion) |
 
+## AI analyst
+
+`src/ai/analyst.py` is a terminal chat loop that sends your question to
+Claude along with 10 tools (`src/ai/tools.py`), each one a thin wrapper
+around one of the functions in the table above. Claude decides which
+tool(s) the question needs, the tool runs the underlying SQL view, and
+Claude writes its answer from the returned rows — it cannot compute a
+number on its own; there's no code path where it does math or invents
+a figure. Run it with:
+
+```bash
+python -m src.ai.analyst
+```
+
+Not every analytics function is exposed as a tool. `get_customer_metrics`,
+`get_customer_rfm_segments`, `get_customer_churn_risk`, and
+`get_product_performance` are left out on purpose — they return one row
+per household (~2,500) or per product (tens of thousands), too large
+to hand an LLM as a single tool result. Their bounded summary
+counterparts (`get_segment_summary`, `get_churn_summary`,
+`get_top_products`, `get_department_performance`) are exposed instead.
+The raw functions still work directly from Python/notebooks, just not
+through chat.
+
+There's no Streamlit UI yet (Phase 5) — this CLI loop exists to test
+the tool-calling layer on its own first.
+
 ## Roadmap
 
 1. **Data foundation** — ETL, MySQL schema ✅
 2. **Analytics engine** — revenue, retention, segmentation, product performance ✅
 3. **Intelligence layer** — decomposition ✅, churn ✅, anomaly detection ✅, promotion effectiveness ✅
-4. **Claude-powered analyst** — tool-calling over validated analytics functions
+4. **Claude-powered analyst** — tool-calling over validated analytics functions ✅
 5. **Streamlit UI**
