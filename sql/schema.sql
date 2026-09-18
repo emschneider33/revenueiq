@@ -15,9 +15,16 @@
 --      the same product can appear more than once within a single
 --      basket (e.g. two separate line entries), so there's no natural
 --      unique key across the raw columns alone.
---   4. causal_data (promotional display/mailer data) is intentionally
---      left out of this initial schema — it's large (~679MB) and only
---      needed once we build promotion-effectiveness analysis.
+--   4. fact_causal_activity (from causal_data.csv, promotional
+--      display/mailer data) uses a surrogate auto-increment PK rather
+--      than a (product_id, store_id, week_no) composite PK, for the
+--      same reason as fact_transaction_line: uniqueness of that triple
+--      hasn't been confirmed against the raw ~696MB file, and a
+--      surrogate key means a stray duplicate row can't abort the bulk
+--      load. It's loaded by a separate script (see
+--      src/ingestion/load_causal_data.py) since it's ~14x the row
+--      count of transaction_data.csv and only needed for
+--      promotion-effectiveness analysis, not the core pipeline.
 
 CREATE DATABASE IF NOT EXISTS revenueiq;
 USE revenueiq;
@@ -44,7 +51,7 @@ CREATE TABLE dim_household_demographics (
     household_key           INT PRIMARY KEY,
     age_desc                VARCHAR(20),
     marital_status_code     VARCHAR(5),
-    income_desc             VARCHAR(20),
+    income_desc              VARCHAR(20),
     homeowner_desc          VARCHAR(30),
     hh_comp_desc             VARCHAR(30),
     household_size_desc     VARCHAR(10),
@@ -151,4 +158,37 @@ CREATE TABLE fact_coupon_redemption (
     CONSTRAINT fk_redemption_campaign
         FOREIGN KEY (campaign) REFERENCES dim_campaign(campaign),
     INDEX idx_redemption_household (household_key)
+);
+
+-- fact_causal_activity: from causal_data.csv. One row per
+-- product/store/week describing that week's promotional activity for
+-- that product at that store -- whether it was on a store display
+-- and/or featured in the mailer/circular that week.
+--
+-- Grain: (product_id, store_id, week_no). NOT loaded by load_data.py's
+-- main() pipeline -- see src/ingestion/load_causal_data.py, a separate
+-- script, since this file is ~14x the row count of transaction_data.csv
+-- (~696MB) and only needed for promotion-effectiveness analysis.
+--
+-- display / mailer are kept as the RAW Dunnhumby codes (e.g. '0' = not
+-- on display/not in mailer, other short alphanumeric codes for
+-- different display locations / mailer placements) -- not decoded into
+-- human-readable labels here. That decoding is deferred to whichever
+-- view/query first needs it, so the raw source values stay inspectable.
+--
+-- No FK on store_id, matching fact_transaction_line -- there's no
+-- dim_store table (store attributes aren't part of this dataset).
+-- week_no also has no FK for the same reason dim_date's week_no
+-- doesn't: dim_date's primary key is day_number, not week_no, so
+-- week_no is just a plain attribute there too, not a valid FK target.
+CREATE TABLE fact_causal_activity (
+    causal_id       BIGINT AUTO_INCREMENT PRIMARY KEY,
+    product_id      BIGINT NOT NULL,
+    store_id        INT NOT NULL,
+    week_no         SMALLINT NOT NULL,
+    display         VARCHAR(5),
+    mailer          VARCHAR(5),
+    CONSTRAINT fk_causal_product
+        FOREIGN KEY (product_id) REFERENCES dim_product(product_id),
+    INDEX idx_causal_product_store_week (product_id, store_id, week_no)
 );

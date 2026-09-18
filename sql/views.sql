@@ -546,3 +546,174 @@ SELECT
     END AS anomaly_flag
 FROM rolling
 ORDER BY year_num, month_num;
+
+-- ============================================================
+-- PROMOTION EFFECTIVENESS
+-- ============================================================
+-- Compares product sales in product/store/weeks where that product
+-- was promoted (on a store display and/or featured in that week's
+-- mailer) vs. weeks where it wasn't, to estimate the sales lift
+-- promotion is associated with.
+--
+-- fact_causal_activity's grain is (product_id, store_id, week_no).
+-- fact_transaction_line already carries its own week_no column (the
+-- raw WEEK_NO field from transaction_data.csv), so sales are
+-- aggregated to that same grain to join cleanly -- no date math
+-- needed to bridge day_number to week_no.
+--
+-- display/mailer coding: per Dunnhumby's published data dictionary,
+-- '0' means "not on display" / "not in mailer" for both columns;
+-- every other short code (e.g. 1-9, A for display; A, C, D, F, H, J,
+-- L, P, X, Z for mailer) represents a different placement or
+-- location. This view collapses all non-'0' codes into a single
+-- "Promoted" flag rather than weighting placement types differently
+-- -- that's a simplifying assumption, not something confirmed
+-- against this specific file (it's too large to inspect directly).
+-- Finer-grained analysis by placement type would need its own view
+-- built on the raw codes, which is why they're kept undecoded in
+-- fact_causal_activity itself. A NULL in either column (shouldn't
+-- occur, but not verified) falls through to 'Not Promoted' rather
+-- than being silently dropped.
+--
+-- product_store_week_sales: sales aggregated to the same grain as
+-- fact_causal_activity (product_id, store_id, week_no). Kept as its
+-- own view (rather than an inline subquery) so it can be indexed
+-- against cleanly and reused elsewhere.
+--
+-- Excludes department IN ('KIOSK-GAS', 'MISC SALES TRAN') -- these
+-- are gas-station fuel purchases and misc kiosk sales tracked through
+-- the same transaction table, discovered via a sanity check on this
+-- view: a handful of these product_ids had absurd units_sold values
+-- (tens of thousands of "units" for a few dollars of sales_value),
+-- because quantity isn't recorded the same way for fuel as it is for
+-- grocery items. They also don't conceptually belong in a
+-- promotion-effectiveness analysis -- nothing in causal_data
+-- represents "put gasoline on a mailer." This filter is scoped to
+-- this view only (and therefore only the promotion views built on
+-- it) -- it does NOT touch monthly_revenue, customer_metrics, or any
+-- other already-validated view, since whether fuel/misc sales should
+-- be excluded from revenue project-wide is a separate decision.
+DROP VIEW IF EXISTS product_store_week_sales;
+
+CREATE VIEW product_store_week_sales AS
+SELECT
+    f.product_id,
+    f.store_id,
+    f.week_no,
+    SUM(f.sales_value) AS revenue,
+    SUM(f.quantity)     AS units_sold
+FROM fact_transaction_line f
+JOIN dim_product p ON p.product_id = f.product_id
+WHERE p.department NOT IN ('KIOSK-GAS', 'MISC SALES TRAN')
+GROUP BY f.product_id, f.store_id, f.week_no;
+
+-- product_promotion_weekly: for every product/store/week that had a
+-- sale, was there a matching causal_activity record?
+--
+-- CORRECTION from the first version of this view: that version
+-- treated fact_causal_activity as if it were a full grid covering
+-- every product/store/week (promoted or not) and looked for
+-- "Not Promoted" rows already inside it (both display and mailer =
+-- '0'). Running it showed 100% of the ~36.8M causal rows as
+-- "Promoted" and zero as "Not Promoted" -- which means
+-- causal_data.csv isn't a full grid, it's a table of promotional
+-- EVENTS: a row exists only when a display and/or mailer placement
+-- actually happened for that product/store/week. There's no
+-- "nothing happened" baseline row to find inside the table itself.
+--
+-- So this view is driven from the sales side instead: "Promoted"
+-- means a matching causal_activity row exists for that
+-- product/store/week (with a non-'0' display or mailer code);
+-- "Not Promoted" means no causal record exists for it at all. This
+-- is also much cheaper to compute -- it's an indexed EXISTS lookup
+-- into fact_causal_activity's (product_id, store_id, week_no) index
+-- per sales row, instead of joining/grouping the full 36.8M-row
+-- causal table directly, which is what caused "Lost connection to
+-- MySQL server during query" on the first version.
+DROP VIEW IF EXISTS product_promotion_weekly;
+
+CREATE VIEW product_promotion_weekly AS
+SELECT
+    s.product_id,
+    s.store_id,
+    s.week_no,
+    CASE WHEN EXISTS (
+        SELECT 1
+        FROM fact_causal_activity c
+        WHERE c.product_id = s.product_id
+          AND c.store_id = s.store_id
+          AND c.week_no = s.week_no
+          AND (c.display <> '0' OR c.mailer <> '0')
+    ) THEN 'Promoted' ELSE 'Not Promoted' END AS promo_status,
+    s.revenue,
+    s.units_sold
+FROM product_store_week_sales s;
+
+-- promotion_lift_summary: overall (all products combined) view of
+-- the promoted-vs-not comparison. Start here before drilling into
+-- individual products.
+DROP VIEW IF EXISTS promotion_lift_summary;
+
+CREATE VIEW promotion_lift_summary AS
+SELECT
+    promo_status,
+    COUNT(*)                        AS product_store_week_count,
+    ROUND(AVG(revenue), 2)          AS avg_revenue_per_product_store_week,
+    ROUND(AVG(units_sold), 2)       AS avg_units_per_product_store_week
+FROM product_promotion_weekly
+GROUP BY promo_status;
+
+-- product_promotion_lift: per-product comparison, with a minimum
+-- sample-size guard (>= 3 promoted and >= 3 not-promoted
+-- product/store/weeks) so the lift % isn't computed off a single
+-- noisy data point for a rarely-promoted or rarely-sold product.
+DROP VIEW IF EXISTS product_promotion_lift;
+
+CREATE VIEW product_promotion_lift AS
+WITH per_product_status AS (
+    SELECT
+        product_id,
+        promo_status,
+        COUNT(*)             AS product_store_week_count,
+        AVG(revenue)         AS avg_revenue_per_product_store_week,
+        AVG(units_sold)      AS avg_units_per_product_store_week
+    FROM product_promotion_weekly
+    GROUP BY product_id, promo_status
+),
+pivoted AS (
+    SELECT
+        product_id,
+        MAX(CASE WHEN promo_status = 'Promoted' THEN avg_revenue_per_product_store_week END)     AS avg_revenue_promoted,
+        MAX(CASE WHEN promo_status = 'Not Promoted' THEN avg_revenue_per_product_store_week END)  AS avg_revenue_not_promoted,
+        MAX(CASE WHEN promo_status = 'Promoted' THEN avg_units_per_product_store_week END)        AS avg_units_promoted,
+        MAX(CASE WHEN promo_status = 'Not Promoted' THEN avg_units_per_product_store_week END)    AS avg_units_not_promoted,
+        MAX(CASE WHEN promo_status = 'Promoted' THEN product_store_week_count END)                AS promoted_week_count,
+        MAX(CASE WHEN promo_status = 'Not Promoted' THEN product_store_week_count END)            AS not_promoted_week_count
+    FROM per_product_status
+    GROUP BY product_id
+)
+SELECT
+    p.product_id,
+    p.department,
+    p.commodity_desc,
+    p.brand,
+    pv.promoted_week_count,
+    pv.not_promoted_week_count,
+    ROUND(pv.avg_revenue_promoted, 2)      AS avg_revenue_promoted,
+    ROUND(pv.avg_revenue_not_promoted, 2)  AS avg_revenue_not_promoted,
+    ROUND(pv.avg_units_promoted, 2)        AS avg_units_promoted,
+    ROUND(pv.avg_units_not_promoted, 2)    AS avg_units_not_promoted,
+    CASE
+        WHEN pv.avg_revenue_not_promoted > 0
+            THEN ROUND((pv.avg_revenue_promoted - pv.avg_revenue_not_promoted) / pv.avg_revenue_not_promoted * 100, 1)
+        ELSE NULL
+    END AS revenue_lift_pct,
+    CASE
+        WHEN pv.avg_units_not_promoted > 0
+            THEN ROUND((pv.avg_units_promoted - pv.avg_units_not_promoted) / pv.avg_units_not_promoted * 100, 1)
+        ELSE NULL
+    END AS units_lift_pct
+FROM pivoted pv
+JOIN dim_product p ON p.product_id = pv.product_id
+WHERE pv.promoted_week_count >= 3 AND pv.not_promoted_week_count >= 3
+ORDER BY revenue_lift_pct DESC;

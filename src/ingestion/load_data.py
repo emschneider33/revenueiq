@@ -7,7 +7,12 @@ Expects the 7 core CSVs to already be sitting in data/raw/:
     transaction_data.csv, product.csv, hh_demographic.csv,
     campaign_table.csv, campaign_desc.csv, coupon.csv, coupon_redempt.csv
 
-(causal_data.csv is intentionally not loaded yet — see schema.sql notes.)
+causal_data.csv (promotional display/mailer data) is NOT loaded by
+this script -- it's ~14x the row count of transaction_data.csv and
+only needed for promotion-effectiveness analysis. It has its own
+loader: run `python -m src.ingestion.load_causal_data` separately,
+after this script and after creating fact_causal_activity (see the
+bottom of sql/schema.sql).
 
 Load order matters because of foreign keys:
     dim_date -> dim_household -> dim_household_demographics -> dim_product

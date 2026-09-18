@@ -35,12 +35,14 @@ Phase 2: Analytics engine — complete. `monthly_revenue`,
 `product_performance`, and `department_performance` are all built and
 validated (see Known data caveats and Performance notes below).
 
-Phase 3: Intelligence layer — started. `monthly_revenue_decomposition`
+Phase 3: Intelligence layer — complete. `monthly_revenue_decomposition`
 (revenue bridge: New/Retained/Reactivated customer revenue per month),
 `customer_churn_risk` (Active/At Risk/Churned classification per
-household), and `monthly_revenue_anomalies` (Spike/Drop/Normal flag
-per month vs. a trailing rolling baseline) are built and validated.
-Promotion effectiveness is still to come.
+household), `monthly_revenue_anomalies` (Spike/Drop/Normal flag per
+month vs. a trailing rolling baseline), and `promotion_lift_summary` /
+`product_promotion_lift` (sales lift when a product was on display
+and/or in the mailer vs. not, overall and per-product) are all built
+and validated.
 
 ## Project structure
 
@@ -140,9 +142,45 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
 - **Only ~801 of 2,500 households have demographic data** (`dim_household_demographics`).
   Demographic-based segmentation will only ever cover a subset of the
   full customer base.
-- **`causal_data.csv` (promotional display/mailer data, ~679MB) is not
-  yet loaded** — deferred to when promotion-effectiveness analysis is
-  built.
+- **`causal_data.csv` is a table of promotional events, not a full
+  grid.** It was originally assumed this table covered every
+  product/store/week with a promoted/not-promoted flag either way.
+  Running the first version of `promotion_lift_summary` disproved
+  that: 100% of its ~36.8M rows came back "Promoted" and zero
+  "Not Promoted" — meaning a row only exists when a display and/or
+  mailer placement actually happened. `product_promotion_weekly` is
+  built accordingly: for every product/store/week that had a sale,
+  "Promoted" means a matching causal record exists; "Not Promoted"
+  means none does. There's no row in `causal_data.csv` that means
+  "confirmed not promoted."
+- **`display`/`mailer` codes are collapsed to a single Promoted flag.**
+  Per Dunnhumby's published data dictionary, `'0'` means "not on
+  display"/"not in mailer" for both columns; every other short code
+  represents a different placement (front page, interior page, etc.).
+  The promotion views treat any non-`'0'` code as "Promoted" without
+  weighting placement types differently — not confirmed against this
+  specific file (it's too large to inspect directly). Finer-grained
+  analysis by placement type would need its own view built on the raw
+  codes, which are kept undecoded in `fact_causal_activity` for that
+  reason.
+- **Gas-station and misc-kiosk sales are excluded from the promotion
+  views only.** `product_store_week_sales` filters out
+  `department IN ('KIOSK-GAS', 'MISC SALES TRAN')`. These were
+  discovered via a sanity check: a handful of these product_ids had
+  `quantity` values in the tens of thousands for a few dollars of
+  `sales_value`, because fuel purchases don't record quantity the way
+  grocery items do. They also don't conceptually fit a
+  promotion-effectiveness analysis. This filter is scoped to the
+  promotion views — it does **not** change `monthly_revenue`,
+  `customer_metrics`, or any other already-validated view; whether
+  fuel/misc sales should be excluded from revenue project-wide is a
+  separate decision, not made here.
+- **`product_promotion_lift` requires a minimum sample size** (at
+  least 3 promoted and 3 not-promoted product/store/weeks) before
+  computing a lift % for a product, to avoid a single noisy data point
+  driving an extreme-looking lift number. Products below that
+  threshold simply don't appear in the view (12,269 products qualify,
+  out of the full catalog).
 - **`monthly_revenue_anomalies` treats 2016-01 and 2017-12 as known,
   not statistical, anomalies.** Both are flagged `'Known partial period
   (see README)'` directly rather than scored against the rolling
@@ -185,6 +223,18 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
   Hitting that limit surfaces as `Error Code: 2013. Lost connection to
   MySQL server during query` — which looks like a server crash but
   isn't one. Raise it to something like 300 seconds.
+- **`fact_causal_activity` (~36.8M rows) needs query design, not just
+  a bigger buffer pool.** The first version of `product_promotion_weekly`
+  joined the full causal table directly against a derived aggregate of
+  `fact_transaction_line` and then grouped that huge intermediate
+  result by product — this lost the MySQL connection even with a
+  healthy buffer pool. The fix was structural: drive the view from the
+  much smaller sales side (`product_store_week_sales`, aggregated from
+  ~2.6M transaction lines) and use an indexed `EXISTS` lookup into
+  `fact_causal_activity` per sales row, instead of joining/grouping
+  the full causal table. Keep this in mind before adding any other
+  view on top of `fact_causal_activity` — the table it's built on
+  matters as much as the buffer pool size.
 
 ## Analytics reference
 
@@ -199,11 +249,13 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
 | `monthly_revenue_decomposition` | `sql/views.sql`, `src/analytics/revenue.py` | Revenue bridge: each month's total revenue split into New/Retained/Reactivated customer revenue, plus non-returning-customer revenue as context for the following month (see comment in `sql/views.sql` for the exact classification rules and sanity checks) |
 | `customer_churn_risk` | `sql/views.sql`, `src/analytics/churn.py` | Active/At Risk/Churned classification per household, based on recency relative to each household's own historical purchase cadence rather than a single global cutoff (see comment in `sql/views.sql` for the cadence calculation, population-median fallback, and thresholds) |
 | `monthly_revenue_anomalies` | `sql/views.sql`, `src/analytics/revenue.py` | Spike/Drop/Normal flag per month, based on a z-score against a trailing rolling baseline (up to 6 preceding months) — with 2016-01/2017-12 flagged as known partial periods rather than scored (see comment in `sql/views.sql` for the rolling window, thresholds, and edge cases) |
+| `promotion_lift_summary` | `sql/views.sql`, `src/analytics/promotions.py` | Overall (all products combined) average revenue/units per product/store/week when promoted vs. not — the starting point before drilling into individual products |
+| `product_promotion_lift` | `sql/views.sql`, `src/analytics/promotions.py` | Per-product revenue/units lift % when promoted vs. not, for products with enough sample size on both sides (see caveats above on the promoted/not-promoted definition, the display/mailer code assumption, and the gas/kiosk exclusion) |
 
 ## Roadmap
 
 1. **Data foundation** — ETL, MySQL schema ✅
 2. **Analytics engine** — revenue, retention, segmentation, product performance ✅
-3. **Intelligence layer** — decomposition ✅, churn ✅, anomaly detection ✅, promotion effectiveness
+3. **Intelligence layer** — decomposition ✅, churn ✅, anomaly detection ✅, promotion effectiveness ✅
 4. **Claude-powered analyst** — tool-calling over validated analytics functions
 5. **Streamlit UI**
