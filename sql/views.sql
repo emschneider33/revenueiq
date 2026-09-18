@@ -297,3 +297,91 @@ SELECT
 FROM dept_agg d
 CROSS JOIN total t
 ORDER BY d.total_revenue DESC;
+
+-- monthly_revenue_decomposition: breaks each month's total_revenue down
+-- into how much came from New, Retained, and Reactivated households,
+-- so MoM revenue changes can be explained by customer-base dynamics
+-- rather than just reported as a single delta.
+--
+-- Per-household-per-month classification (mutually exclusive, and
+-- together they account for 100% of that month's revenue):
+--   New         - this is the household's first-ever purchase month
+--                 (no earlier month_period exists for them at all)
+--   Retained    - the household also purchased in the immediately
+--                 preceding calendar month
+--   Reactivated - the household purchased in some earlier month, but
+--                 NOT in the immediately preceding month, and is back
+--                 this month
+--
+-- non_returning_customer_revenue is a different cut, attached to the
+-- month it was earned in: revenue from households who purchased THIS
+-- month but do not purchase again next month. It answers "how much of
+-- this month's revenue is at risk of not repeating" -- useful context
+-- for the month right after it, but it is NOT part of the
+-- new/retained/reactivated split above (a dollar can be both, e.g.
+-- "Retained this month, but won't return next month").
+--
+-- Sanity check: new_customer_revenue + retained_customer_revenue +
+-- reactivated_customer_revenue must equal total_revenue for every row,
+-- and total_revenue here should match monthly_revenue.total_revenue
+-- exactly for the same (year_num, month_num). The dataset's first
+-- month (2016-01) should be 100% New, since no earlier month exists
+-- for anyone to be Retained/Reactivated from.
+--
+-- This is a historical revenue bridge, not a churn forecast -- it
+-- explains what already happened. Forward-looking churn risk is a
+-- separate roadmap item.
+DROP VIEW IF EXISTS monthly_revenue_decomposition;
+
+CREATE VIEW monthly_revenue_decomposition AS
+WITH household_monthly AS (
+    SELECT
+        f.household_key,
+        d.year_num * 12 + (d.month_num - 1) AS month_period,
+        d.year_num,
+        d.month_num,
+        SUM(f.sales_value) AS revenue
+    FROM fact_transaction_line f
+    JOIN dim_date d ON f.day_number = d.day_number
+    GROUP BY f.household_key, month_period, d.year_num, d.month_num
+),
+household_first_month AS (
+    SELECT household_key, MIN(month_period) AS first_month
+    FROM household_monthly
+    GROUP BY household_key
+),
+classified AS (
+    SELECT
+        hm.household_key,
+        hm.month_period,
+        hm.year_num,
+        hm.month_num,
+        hm.revenue,
+        CASE
+            WHEN hm.month_period = hf.first_month THEN 'New'
+            WHEN prev.household_key IS NOT NULL THEN 'Retained'
+            ELSE 'Reactivated'
+        END AS customer_status,
+        CASE WHEN nxt.household_key IS NULL THEN hm.revenue ELSE 0 END AS non_returning_revenue
+    FROM household_monthly hm
+    JOIN household_first_month hf ON hf.household_key = hm.household_key
+    LEFT JOIN household_monthly prev
+        ON prev.household_key = hm.household_key AND prev.month_period = hm.month_period - 1
+    LEFT JOIN household_monthly nxt
+        ON nxt.household_key = hm.household_key AND nxt.month_period = hm.month_period + 1
+)
+SELECT
+    year_num,
+    month_num,
+    SUM(revenue)                                                                       AS total_revenue,
+    SUM(CASE WHEN customer_status = 'New' THEN revenue ELSE 0 END)                      AS new_customer_revenue,
+    COUNT(DISTINCT CASE WHEN customer_status = 'New' THEN household_key END)            AS new_customer_count,
+    SUM(CASE WHEN customer_status = 'Retained' THEN revenue ELSE 0 END)                 AS retained_customer_revenue,
+    COUNT(DISTINCT CASE WHEN customer_status = 'Retained' THEN household_key END)       AS retained_customer_count,
+    SUM(CASE WHEN customer_status = 'Reactivated' THEN revenue ELSE 0 END)              AS reactivated_customer_revenue,
+    COUNT(DISTINCT CASE WHEN customer_status = 'Reactivated' THEN household_key END)    AS reactivated_customer_count,
+    SUM(non_returning_revenue)                                                          AS non_returning_customer_revenue,
+    COUNT(DISTINCT CASE WHEN non_returning_revenue > 0 THEN household_key END)          AS non_returning_customer_count
+FROM classified
+GROUP BY year_num, month_num
+ORDER BY year_num, month_num;
