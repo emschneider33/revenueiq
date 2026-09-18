@@ -35,6 +35,11 @@ Phase 2: Analytics engine — complete. `monthly_revenue`,
 `product_performance`, and `department_performance` are all built and
 validated (see Known data caveats and Performance notes below).
 
+Phase 3: Intelligence layer — started. `monthly_revenue_decomposition`
+(revenue bridge: New/Retained/Reactivated customer revenue per month)
+is built and validated. Anomaly detection, churn, and promotion
+effectiveness are still to come.
+
 ## Project structure
 
 ```
@@ -177,11 +182,12 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
 | `customer_rfm_segments` | `sql/views.sql`, `src/analytics/segmentation.py` | RFM (Recency/Frequency/Monetary) score and segment label per household — Champions, Loyal Customers, Promising, At Risk, Hibernating, Needs Attention |
 | `product_performance` | `sql/views.sql`, `src/analytics/products.py` | Per-product revenue, units sold, transaction count, unique customers, avg unit price, with department/brand/commodity descriptors |
 | `department_performance` | `sql/views.sql`, `src/analytics/products.py` | Revenue/units/customer-reach rollup by department, with each department's share of total revenue |
+| `monthly_revenue_decomposition` | `sql/views.sql`, `src/analytics/revenue.py` | Revenue bridge: each month's total revenue split into New/Retained/Reactivated customer revenue, plus non-returning-customer revenue as context for the following month (see comment in `sql/views.sql` for the exact classification rules and sanity checks) |
 
 ## Roadmap
 
 1. **Data foundation** — ETL, MySQL schema ✅
 2. **Analytics engine** — revenue, retention, segmentation, product performance ✅
-3. **Intelligence layer** — decomposition, anomaly detection, churn, promotion effectiveness
+3. **Intelligence layer** — decomposition ✅, anomaly detection, churn, promotion effectiveness
 4. **Claude-powered analyst** — tool-calling over validated analytics functions
 5. **Streamlit UI**
