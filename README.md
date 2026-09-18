@@ -37,7 +37,8 @@ validated (see Known data caveats and Performance notes below).
 
 Phase 3: Intelligence layer — started. `monthly_revenue_decomposition`
 (revenue bridge: New/Retained/Reactivated customer revenue per month)
-is built and validated. Anomaly detection, churn, and promotion
+and `customer_churn_risk` (Active/At Risk/Churned classification per
+household) are built and validated. Anomaly detection and promotion
 effectiveness are still to come.
 
 ## Project structure
@@ -130,6 +131,11 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
   retention curve that appears to "stop" for a recent cohort ran out
   of calendar, not customers — don't compare cohorts past the point
   where the older one is right-censored.
+- **`customer_churn_risk` is retrospective, not real-time,** for the
+  same reason. It's a snapshot as of the dataset's truncated end date,
+  and it under-penalizes households whose last purchase landed right
+  before the window closed — they simply didn't have much runway left
+  in the data to come back before we stopped counting.
 - **Only ~801 of 2,500 households have demographic data** (`dim_household_demographics`).
   Demographic-based segmentation will only ever cover a subset of the
   full customer base.
@@ -183,11 +189,12 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
 | `product_performance` | `sql/views.sql`, `src/analytics/products.py` | Per-product revenue, units sold, transaction count, unique customers, avg unit price, with department/brand/commodity descriptors |
 | `department_performance` | `sql/views.sql`, `src/analytics/products.py` | Revenue/units/customer-reach rollup by department, with each department's share of total revenue |
 | `monthly_revenue_decomposition` | `sql/views.sql`, `src/analytics/revenue.py` | Revenue bridge: each month's total revenue split into New/Retained/Reactivated customer revenue, plus non-returning-customer revenue as context for the following month (see comment in `sql/views.sql` for the exact classification rules and sanity checks) |
+| `customer_churn_risk` | `sql/views.sql`, `src/analytics/churn.py` | Active/At Risk/Churned classification per household, based on recency relative to each household's own historical purchase cadence rather than a single global cutoff (see comment in `sql/views.sql` for the cadence calculation, population-median fallback, and thresholds) |
 
 ## Roadmap
 
 1. **Data foundation** — ETL, MySQL schema ✅
 2. **Analytics engine** — revenue, retention, segmentation, product performance ✅
-3. **Intelligence layer** — decomposition ✅, anomaly detection, churn, promotion effectiveness
+3. **Intelligence layer** — decomposition ✅, churn ✅, anomaly detection, promotion effectiveness
 4. **Claude-powered analyst** — tool-calling over validated analytics functions
 5. **Streamlit UI**

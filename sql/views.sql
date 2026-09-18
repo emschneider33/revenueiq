@@ -385,3 +385,89 @@ SELECT
 FROM classified
 GROUP BY year_num, month_num
 ORDER BY year_num, month_num;
+
+-- customer_churn_risk: classifies every household as Active, At Risk, or
+-- Churned based on how their current recency_days compares to THEIR OWN
+-- historical purchase cadence -- not a single global "days since last
+-- purchase" cutoff, which would misclassify naturally infrequent
+-- shoppers (e.g. a household that buys every 45 days isn't churned
+-- just because it's been 40 days).
+--
+-- avg_days_between_purchases = tenure_days / (order_count - 1), i.e.
+-- the average gap between this household's first and most recent
+-- purchase, spread across their orders. Undefined for households with
+-- only 1 order (or the rare case of 2+ orders all on the same day,
+-- giving a 0-day gap that would make any recency look infinitely
+-- overdue) -- both cases fall back to expected_purchase_gap_days, the
+-- MEDIAN avg_days_between_purchases across all households with a
+-- computable gap (MySQL has no MEDIAN()/PERCENTILE_CONT, so it's
+-- computed via ROW_NUMBER()/COUNT() over a sorted window instead).
+-- cadence_is_estimated flags every row using that fallback, so
+-- low-confidence classifications are easy to filter out or discount.
+--
+-- Thresholds (recency_days vs. expected_purchase_gap_days):
+--   Active   - recency_days <= 1.5x the expected gap (within normal
+--              variation of their usual cycle)
+--   At Risk  - recency_days between 1.5x and 3x the expected gap
+--              (overdue, but not yet clearly gone)
+--   Churned  - recency_days > 3x the expected gap
+-- These multipliers are a starting heuristic, not a validated model --
+-- easy to retune here once there's a way to check them against actual
+-- outcomes.
+--
+-- Caveat inherited from customer_metrics: recency_days is measured
+-- against the dataset's truncated Dec 2017 end date (see README), so
+-- this is a historical/retrospective flag as of that snapshot, not a
+-- real-time one -- and it under-penalizes households whose last
+-- purchase fell right before the window closed, since there was little
+-- time left in the data for them to return before we stopped counting.
+DROP VIEW IF EXISTS customer_churn_risk;
+
+CREATE VIEW customer_churn_risk AS
+WITH gap_calc AS (
+    SELECT
+        cm.household_key,
+        cm.total_revenue,
+        cm.order_count,
+        cm.recency_days,
+        cm.tenure_days,
+        CASE
+            WHEN cm.order_count > 1 THEN cm.tenure_days / (cm.order_count - 1)
+            ELSE NULL
+        END AS avg_days_between_purchases
+    FROM customer_metrics cm
+),
+ranked_gaps AS (
+    SELECT
+        avg_days_between_purchases,
+        ROW_NUMBER() OVER (ORDER BY avg_days_between_purchases) AS rn,
+        COUNT(*) OVER ()                                          AS cnt
+    FROM gap_calc
+    WHERE avg_days_between_purchases IS NOT NULL
+      AND avg_days_between_purchases > 0
+),
+population_median AS (
+    SELECT AVG(avg_days_between_purchases) AS median_gap
+    FROM ranked_gaps
+    WHERE rn IN (FLOOR((cnt + 1) / 2), CEIL((cnt + 1) / 2))
+)
+SELECT
+    g.household_key,
+    g.total_revenue,
+    g.order_count,
+    g.recency_days,
+    g.tenure_days,
+    g.avg_days_between_purchases,
+    CASE
+        WHEN g.avg_days_between_purchases IS NULL OR g.avg_days_between_purchases = 0 THEN TRUE
+        ELSE FALSE
+    END AS cadence_is_estimated,
+    ROUND(COALESCE(NULLIF(g.avg_days_between_purchases, 0), pm.median_gap), 1) AS expected_purchase_gap_days,
+    ROUND(g.recency_days / COALESCE(NULLIF(g.avg_days_between_purchases, 0), pm.median_gap), 2) AS recency_to_gap_ratio,
+    CASE
+        WHEN g.recency_days <= 1.5 * COALESCE(NULLIF(g.avg_days_between_purchases, 0), pm.median_gap) THEN 'Active'
+        WHEN g.recency_days <= 3.0 * COALESCE(NULLIF(g.avg_days_between_purchases, 0), pm.median_gap) THEN 'At Risk'
+        ELSE 'Churned'
+    END AS churn_status
+FROM gap_calc g
+CROSS JOIN population_median pm;
