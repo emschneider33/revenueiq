@@ -36,10 +36,11 @@ Phase 2: Analytics engine — complete. `monthly_revenue`,
 validated (see Known data caveats and Performance notes below).
 
 Phase 3: Intelligence layer — started. `monthly_revenue_decomposition`
-(revenue bridge: New/Retained/Reactivated customer revenue per month)
-and `customer_churn_risk` (Active/At Risk/Churned classification per
-household) are built and validated. Anomaly detection and promotion
-effectiveness are still to come.
+(revenue bridge: New/Retained/Reactivated customer revenue per month),
+`customer_churn_risk` (Active/At Risk/Churned classification per
+household), and `monthly_revenue_anomalies` (Spike/Drop/Normal flag
+per month vs. a trailing rolling baseline) are built and validated.
+Promotion effectiveness is still to come.
 
 ## Project structure
 
@@ -142,6 +143,13 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
 - **`causal_data.csv` (promotional display/mailer data, ~679MB) is not
   yet loaded** — deferred to when promotion-effectiveness analysis is
   built.
+- **`monthly_revenue_anomalies` treats 2016-01 and 2017-12 as known,
+  not statistical, anomalies.** Both are flagged `'Known partial period
+  (see README)'` directly rather than scored against the rolling
+  baseline, since their low revenue is the panel ramp-up / truncated
+  end-of-window artifact described above, not a real business event —
+  and left unflagged, they'd also distort the baseline for the months
+  next to them.
 - **No returns in the raw data (checked).** `fact_transaction_line`
   has no negative `quantity` or `sales_value` rows (verified via
   `MIN()` on both columns), so `total_revenue` and `units_sold` in
@@ -190,11 +198,12 @@ Place the downloaded CSVs in `data/raw/` (untouched, as-downloaded).
 | `department_performance` | `sql/views.sql`, `src/analytics/products.py` | Revenue/units/customer-reach rollup by department, with each department's share of total revenue |
 | `monthly_revenue_decomposition` | `sql/views.sql`, `src/analytics/revenue.py` | Revenue bridge: each month's total revenue split into New/Retained/Reactivated customer revenue, plus non-returning-customer revenue as context for the following month (see comment in `sql/views.sql` for the exact classification rules and sanity checks) |
 | `customer_churn_risk` | `sql/views.sql`, `src/analytics/churn.py` | Active/At Risk/Churned classification per household, based on recency relative to each household's own historical purchase cadence rather than a single global cutoff (see comment in `sql/views.sql` for the cadence calculation, population-median fallback, and thresholds) |
+| `monthly_revenue_anomalies` | `sql/views.sql`, `src/analytics/revenue.py` | Spike/Drop/Normal flag per month, based on a z-score against a trailing rolling baseline (up to 6 preceding months) — with 2016-01/2017-12 flagged as known partial periods rather than scored (see comment in `sql/views.sql` for the rolling window, thresholds, and edge cases) |
 
 ## Roadmap
 
 1. **Data foundation** — ETL, MySQL schema ✅
 2. **Analytics engine** — revenue, retention, segmentation, product performance ✅
-3. **Intelligence layer** — decomposition ✅, churn ✅, anomaly detection, promotion effectiveness
+3. **Intelligence layer** — decomposition ✅, churn ✅, anomaly detection ✅, promotion effectiveness
 4. **Claude-powered analyst** — tool-calling over validated analytics functions
 5. **Streamlit UI**

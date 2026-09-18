@@ -471,3 +471,78 @@ SELECT
     END AS churn_status
 FROM gap_calc g
 CROSS JOIN population_median pm;
+
+-- monthly_revenue_anomalies: flags each month's total_revenue as a
+-- Spike, Drop, or Normal relative to a TRAILING rolling baseline built
+-- from the preceding months only -- the current month never influences
+-- its own baseline, so a real anomaly doesn't get diluted into "normal"
+-- by including itself in the average.
+--
+-- Baseline: trailing up-to-6-month rolling mean and sample standard
+-- deviation of total_revenue (ROWS BETWEEN 6 PRECEDING AND 1
+-- PRECEDING). z_score = (total_revenue - rolling_avg_revenue) /
+-- rolling_stddev_revenue. |z_score| >= 2 is flagged Spike/Drop;
+-- anything else with a usable baseline is Normal.
+--
+-- Two situations get their own flag instead of a z-score verdict:
+--   - 'Insufficient baseline' - fewer than 3 preceding months exist yet
+--     (the first few rows of the dataset), so the rolling mean/stddev
+--     aren't reliable. rolling_window_size shows exactly how many
+--     preceding months went into that row's baseline.
+--   - 'Known partial period (see README)' - 2016-01 and 2017-12. These
+--     are flagged directly rather than left to the z-score, because
+--     their revenue is mechanically low from panel ramp-up / the
+--     dataset's truncated end date (see Known data caveats in
+--     README.md), not a real business event -- and because they sit at
+--     the very start/end of the series, they'd otherwise also corrupt
+--     the rolling baseline for the months right next to them.
+--
+-- MySQL has no MEDIAN()/rolling built-ins beyond standard window
+-- functions, so this uses AVG()/STDDEV_SAMP() with an explicit ROWS
+-- frame -- both are valid as window functions in MySQL 8.0.
+DROP VIEW IF EXISTS monthly_revenue_anomalies;
+
+CREATE VIEW monthly_revenue_anomalies AS
+WITH rolling AS (
+    SELECT
+        year_num,
+        month_num,
+        month_start_date,
+        total_revenue,
+        AVG(total_revenue) OVER (
+            ORDER BY month_start_date
+            ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING
+        ) AS rolling_avg_revenue,
+        STDDEV_SAMP(total_revenue) OVER (
+            ORDER BY month_start_date
+            ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING
+        ) AS rolling_stddev_revenue,
+        COUNT(*) OVER (
+            ORDER BY month_start_date
+            ROWS BETWEEN 6 PRECEDING AND 1 PRECEDING
+        ) AS rolling_window_size
+    FROM monthly_revenue
+)
+SELECT
+    year_num,
+    month_num,
+    month_start_date,
+    total_revenue,
+    ROUND(rolling_avg_revenue, 2)    AS rolling_avg_revenue,
+    ROUND(rolling_stddev_revenue, 2) AS rolling_stddev_revenue,
+    rolling_window_size,
+    CASE
+        WHEN rolling_stddev_revenue IS NULL OR rolling_stddev_revenue = 0 THEN NULL
+        ELSE ROUND((total_revenue - rolling_avg_revenue) / rolling_stddev_revenue, 2)
+    END AS z_score,
+    CASE
+        WHEN (year_num = 2016 AND month_num = 1) OR (year_num = 2017 AND month_num = 12)
+            THEN 'Known partial period (see README)'
+        WHEN rolling_window_size < 3 OR rolling_stddev_revenue IS NULL OR rolling_stddev_revenue = 0
+            THEN 'Insufficient baseline'
+        WHEN ABS((total_revenue - rolling_avg_revenue) / rolling_stddev_revenue) >= 2
+            THEN CASE WHEN total_revenue > rolling_avg_revenue THEN 'Spike' ELSE 'Drop' END
+        ELSE 'Normal'
+    END AS anomaly_flag
+FROM rolling
+ORDER BY year_num, month_num;

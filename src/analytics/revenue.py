@@ -38,6 +38,24 @@ def get_monthly_revenue_decomposition(engine: Engine) -> pd.DataFrame:
     return pd.read_sql(query, engine)
 
 
+def get_monthly_revenue_anomalies(engine: Engine) -> pd.DataFrame:
+    """Each month's total revenue flagged as Spike, Drop, or Normal
+    against a trailing rolling baseline (up to 6 preceding months),
+    plus the z-score and baseline stats behind that flag.
+
+    2016-01 and 2017-12 are flagged 'Known partial period (see README)'
+    rather than scored — their low revenue is a data-collection artifact,
+    not a real anomaly. Rows with fewer than 3 preceding months of
+    history are flagged 'Insufficient baseline'. See the comment above
+    monthly_revenue_anomalies in sql/views.sql for the exact rolling
+    window and thresholds.
+
+    Returns a DataFrame with one row per calendar month, sorted chronologically.
+    """
+    query = "SELECT * FROM monthly_revenue_anomalies ORDER BY year_num, month_num"
+    return pd.read_sql(query, engine)
+
+
 if __name__ == "__main__":
     # Quick manual check: run this file directly to print the monthly
     # revenue table to the console.
